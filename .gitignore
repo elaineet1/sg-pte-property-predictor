@@ -2,9 +2,8 @@
 *.csv
 data/
 
-# Trained model files (large binaries)
+# Old single-model files (replaced by pretrain.py output)
 model.pkl
-encoders.pkl
 
 # Streamlit logs
 streamlit.log

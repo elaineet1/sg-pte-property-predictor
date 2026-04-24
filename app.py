@@ -50,12 +50,39 @@ for k in ("models", "encoders", "metrics", "growth_rates", "mape_by_seg",
 if st.session_state.trained is None:
     st.session_state.trained = False
 
+# ── Auto-load pre-trained models on startup ────────────────────────────────────
+MODELS_PATH   = "models.pkl"
+ENCODERS_PATH = "encoders.pkl"
+META_PATH     = "pretrained_meta.pkl"
+
+if (not st.session_state.trained
+        and os.path.exists(MODELS_PATH)
+        and os.path.exists(ENCODERS_PATH)
+        and os.path.exists(META_PATH)):
+    with open(MODELS_PATH,   "rb") as f: _models   = pickle.load(f)
+    with open(ENCODERS_PATH, "rb") as f: _encoders = pickle.load(f)
+    with open(META_PATH,     "rb") as f: _meta     = pickle.load(f)
+    st.session_state.update({
+        "models":       _models,
+        "encoders":     _encoders,
+        "metrics":      _meta["metrics"],
+        "mape_by_seg":  _meta["mape_by_seg"],
+        "growth_rates": _meta["growth_rates"],
+        "project_meta": _meta["project_meta"],
+        "tier_counts":  _meta["tier_counts"],
+        "df":           pd.DataFrame({"sale_year": [_meta["last_year"]], "tier": ["OCR"],
+                                      "Market Segment": ["Outside Central Region"],
+                                      "region_cluster": ["East"]}),
+        "trained":      True,
+    })
+
 
 def xgb_params():
     return dict(
         n_estimators=600, max_depth=8, learning_rate=0.04,
         subsample=0.8, colsample_bytree=0.8,
         min_child_weight=3, reg_alpha=0.05, reg_lambda=1.0,
+        early_stopping_rounds=50,
         random_state=42, n_jobs=-1, verbosity=0,
     )
 
@@ -74,23 +101,33 @@ def train_tier(tier_df, tier):
     train_enc = apply_encoders(train_df, encoders)
     test_enc  = apply_encoders(test_df,  encoders)
 
-    X_train, y_train = train_enc[feats], train_enc["price"]
-    X_test,  y_test  = test_enc[feats],  test_enc["price"]
+    X_train = train_enc[feats]
+    X_test  = test_enc[feats]
+
+    # Log-transform price: compresses extreme values, improves R² for price regression
+    y_train = np.log1p(train_enc["price"])
+    y_test  = np.log1p(test_enc["price"])
 
     model = XGBRegressor(**xgb_params())
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+    model.fit(X_train, y_train,
+              eval_set=[(X_test, y_test)],
+              verbose=False)
 
-    y_pred  = model.predict(X_test)
+    # Predict and reverse log-transform
+    y_pred_log = model.predict(X_test)
+    y_pred     = np.expm1(y_pred_log)
+    y_true     = test_enc["price"].values
+
     metrics = {
-        "r2":   r2_score(y_test, y_pred),
-        "mae":  mean_absolute_error(y_test, y_pred),
-        "mape": mean_absolute_percentage_error(y_test, y_pred) * 100,
+        "r2":   r2_score(y_true, y_pred),
+        "mae":  mean_absolute_error(y_true, y_pred),
+        "mape": mean_absolute_percentage_error(y_true, y_pred) * 100,
         "rows": len(tier_df),
     }
 
     tmp = test_enc.copy()
     tmp["y_pred"] = y_pred
-    tmp["y_true"] = y_test.values
+    tmp["y_true"] = y_true
     mape_seg = (
         tmp.groupby("Market Segment")
         .apply(lambda g: np.mean(np.abs((g["y_true"] - g["y_pred"]) / g["y_true"])) * 100)
@@ -454,7 +491,7 @@ if predict_btn:
         }
         return {k: row[k] for k in feats}
 
-    base_price  = float(model.predict(pd.DataFrame([make_row(last_year)]))[0])
+    base_price  = float(np.expm1(model.predict(pd.DataFrame([make_row(last_year)]))[0]))
     predicted   = base_price * ((1 + annual_rate) ** years_ahead)
     base_mape   = mape_seg_map.get(segment, metrics_dict[selected_tier]["mape"]) / 100
     total_mape  = base_mape * (1 + 0.20 * years_ahead)
