@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import pickle
+import hashlib
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from sklearn.model_selection import train_test_split
@@ -98,6 +99,54 @@ def train_tier(tier_df, tier):
     return model, encoders, metrics, mape_seg
 
 
+@st.cache_resource
+def train_all_tiers(fingerprint, _df):
+    """
+    Train all 4 tier models. Cached by data fingerprint so page refreshes
+    and repeated uploads of the same data skip retraining entirely.
+    The leading underscore on _df tells Streamlit not to hash it —
+    fingerprint is the cache key instead.
+    """
+    models, encoders_dict, metrics_dict, mape_dict = {}, {}, {}, {}
+    tier_counts = _df["tier"].value_counts().to_dict()
+
+    for tier in TIERS:
+        tier_df = _df[_df["tier"] == tier].copy()
+        model, enc, met, mape_seg = train_tier(tier_df, tier)
+        if model is None:
+            continue
+        models[tier]         = model
+        encoders_dict[tier]  = enc
+        metrics_dict[tier]   = met
+        mape_dict[tier]      = mape_seg
+
+    growth_rates = compute_growth_rates(_df)
+
+    project_meta = (
+        _df.groupby("Project Name")
+        .agg(
+            tier=("tier",              lambda x: x.mode()[0]),
+            segment=("Market Segment", lambda x: x.mode()[0]),
+            proptype=("Property Type", lambda x: x.mode()[0]),
+            tenure=("tenure_label",    lambda x: x.mode()[0]),
+            lease_start=("lease_start","median"),
+            district=("district",      "median"),
+            region=("region_cluster",  lambda x: x.mode()[0]),
+        )
+        .reset_index()
+    )
+
+    return (models, encoders_dict, metrics_dict, mape_dict,
+            growth_rates, project_meta.set_index("Project Name").to_dict("index"),
+            tier_counts)
+
+
+def make_fingerprint(df):
+    """Create a short hash from the dataframe so cache_resource can key on it."""
+    h = pd.util.hash_pandas_object(df, index=False).values
+    return hashlib.md5(h.tobytes()).hexdigest()
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("1 · Upload Data")
@@ -132,37 +181,15 @@ if train_btn and uploaded:
         st.error("No valid Resale data found. Check your CSV files.")
         st.stop()
 
-    models, encoders_dict, metrics_dict, mape_dict = {}, {}, {}, {}
-    tier_counts = df["tier"].value_counts().to_dict()
+    fingerprint = make_fingerprint(df)
+    with st.spinner("Training models… (cached — page refreshes will be instant)"):
+        (models, encoders_dict, metrics_dict, mape_dict,
+         growth_rates, project_meta_dict, tier_counts) = train_all_tiers(fingerprint, df)
 
-    for tier, full_label in TIERS.items():
-        tier_df = df[df["tier"] == tier].copy()
-        n = len(tier_df)
-        with st.spinner(f"Training {TIER_LABELS[tier]} on {n:,} rows…"):
-            model, enc, met, mape_seg = train_tier(tier_df, tier)
-        if model is None:
+    for tier in TIERS:
+        if tier not in models:
+            n = len(df[df["tier"] == tier])
             st.warning(f"Not enough data for {TIER_LABELS[tier]} ({n} rows). Skipping.")
-            continue
-        models[tier]        = model
-        encoders_dict[tier] = enc
-        metrics_dict[tier]  = met
-        mape_dict[tier]     = mape_seg
-
-    growth_rates = compute_growth_rates(df)
-
-    project_meta = (
-        df.groupby("Project Name")
-        .agg(
-            tier=("tier",            lambda x: x.mode()[0]),
-            segment=("Market Segment", lambda x: x.mode()[0]),
-            proptype=("Property Type",  lambda x: x.mode()[0]),
-            tenure=("tenure_label",     lambda x: x.mode()[0]),
-            lease_start=("lease_start", "median"),
-            district=("district",       "median"),
-            region=("region_cluster",   lambda x: x.mode()[0]),
-        )
-        .reset_index()
-    )
 
     st.session_state.update({
         "models":       models,
@@ -172,11 +199,9 @@ if train_btn and uploaded:
         "growth_rates": growth_rates,
         "df":           df,
         "tier_counts":  tier_counts,
-        "project_meta": project_meta.set_index("Project Name").to_dict("index"),
+        "project_meta": project_meta_dict,
         "trained":      True,
     })
-    with open("models.pkl",   "wb") as f: pickle.dump(models,        f)
-    with open("encoders.pkl", "wb") as f: pickle.dump(encoders_dict, f)
     st.rerun()
 
 # ── Main ───────────────────────────────────────────────────────────────────────
