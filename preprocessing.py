@@ -7,31 +7,92 @@ CURRENT_YEAR = 2026
 
 # ── Tier definitions ───────────────────────────────────────────────────────────
 TIERS = {
-    "Normal":      "Normal (OCR / RCR Condo & Apartment)",
-    "Luxury":      "Luxury (CCR Condo)",
-    "Ultra":       "Ultra-luxury (Landed)",
+    "OCR":   "Normal — Outside Central Region",
+    "RCR":   "Normal — Rest of Central Region",
+    "CCR":   "Luxury — Core Central Region",
+    "Ultra": "Ultra-luxury — Landed",
 }
 
 LANDED_TYPES = {"Terrace House", "Semi-Detached House", "Detached House"}
+
 
 def classify_tier(property_type, market_segment):
     if property_type in LANDED_TYPES:
         return "Ultra"
     if market_segment == "Core Central Region":
-        return "Luxury"
-    return "Normal"
+        return "CCR"
+    if market_segment == "Rest of Central Region":
+        return "RCR"
+    return "OCR"
 
-# Features used per tier (landed has no floor level)
+
+# ── District → broad region cluster ───────────────────────────────────────────
+# Groups the 28 postal districts into 6 geographic regions.
+# Within each tier, this gives the model a stronger location signal
+# than raw district numbers (which are not ordinal).
+DISTRICT_TO_REGION = {
+    1: "City", 2: "City", 6: "City", 7: "City",
+    8: "City", 9: "City", 10: "City", 11: "City",
+    3: "South", 4: "South",
+    5: "West", 21: "West", 22: "West", 23: "West", 24: "West",
+    12: "Central", 13: "Central", 20: "Central",
+    14: "East-Central", 15: "East-Central",
+    16: "East", 17: "East", 18: "East",
+    19: "North-East", 28: "North-East",
+    25: "North", 26: "North", 27: "North",
+}
+
+
+def get_region_cluster(district):
+    try:
+        return DISTRICT_TO_REGION.get(int(district), "Other")
+    except Exception:
+        return "Other"
+
+
+# ── Features per tier ──────────────────────────────────────────────────────────
+# Ultra (landed) excludes floor_mid — not applicable for ground-level properties.
+# All tiers include region_cluster_enc for stronger location signal.
 FEATURE_COLS = {
-    "Normal": ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
-               "segment_enc", "proptype_enc", "area_type_enc",
-               "sale_year", "sale_month", "district_enc", "project_enc"],
-    "Luxury": ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
-               "segment_enc", "proptype_enc", "area_type_enc",
-               "sale_year", "sale_month", "district_enc", "project_enc"],
-    "Ultra":  ["area_sqft", "lease_remaining", "tenure_enc",
-               "segment_enc", "proptype_enc",
-               "sale_year", "sale_month", "district_enc", "project_enc"],
+    "OCR":   ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
+              "proptype_enc", "area_type_enc",
+              "sale_year", "sale_month",
+              "district_enc", "region_cluster_enc", "project_enc"],
+    "RCR":   ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
+              "proptype_enc", "area_type_enc",
+              "sale_year", "sale_month",
+              "district_enc", "region_cluster_enc", "project_enc"],
+    "CCR":   ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
+              "proptype_enc", "area_type_enc",
+              "sale_year", "sale_month",
+              "district_enc", "region_cluster_enc", "project_enc"],
+    "Ultra": ["area_sqft", "lease_remaining", "tenure_enc",
+              "proptype_enc",
+              "sale_year", "sale_month",
+              "district_enc", "region_cluster_enc", "project_enc"],
+}
+
+# Segment encoding kept for growth rate lookup (not a model feature after tier split)
+SEGMENT_ORDER = {
+    "Core Central Region":    3,
+    "Rest of Central Region": 2,
+    "Outside Central Region": 1,
+}
+
+PROPTYPE_ORDER = {
+    "Detached House":        6,
+    "Semi-Detached House":   5,
+    "Terrace House":         4,
+    "Executive Condominium": 3,
+    "Condominium":           2,
+    "Apartment":             1,
+}
+
+TENURE_ORDER = {
+    "Freehold": 4,
+    "999yr":    3,
+    "99yr":     1,
+    "Other":    0,
 }
 
 # ── Parsers ────────────────────────────────────────────────────────────────────
@@ -51,7 +112,6 @@ def parse_area(val):
 
 
 def parse_sale_date(val):
-    """'Apr-26' → (2026, 4)"""
     try:
         dt = pd.to_datetime(str(val), format="%b-%y")
         return dt.year, dt.month
@@ -60,15 +120,13 @@ def parse_sale_date(val):
 
 
 def parse_tenure(val):
-    """Returns (tenure_label, lease_start_year)"""
     val = str(val).strip()
     if val.lower() == "freehold":
         return "Freehold", np.nan
     m = re.match(r"(\d+)\s+yrs?\s+lease\s+commencing\s+from\s+(\d{4})", val, re.I)
     if m:
         yrs, start = int(m.group(1)), int(m.group(2))
-        label = "999yr" if yrs >= 900 else "99yr"
-        return label, float(start)
+        return ("999yr" if yrs >= 900 else "99yr"), float(start)
     m2 = re.match(r"(\d+)", val)
     if m2:
         return f"{m2.group(1)}yr", np.nan
@@ -76,7 +134,6 @@ def parse_tenure(val):
 
 
 def parse_floor(val):
-    """'06 to 10' → 8.0"""
     nums = re.findall(r"\d+", str(val))
     if len(nums) >= 2:
         return (int(nums[0]) + int(nums[1])) / 2.0
@@ -99,41 +156,14 @@ def compute_lease_remaining(tenure_label, lease_start, ref_year):
         return float(total) / 2
     return max(0.0, lease_start + total - ref_year)
 
-# ── Encodings ──────────────────────────────────────────────────────────────────
-
-SEGMENT_ORDER = {
-    "Core Central Region":    3,
-    "Rest of Central Region": 2,
-    "Outside Central Region": 1,
-}
-
-PROPTYPE_ORDER = {
-    "Detached House":      6,
-    "Semi-Detached House": 5,
-    "Terrace House":       4,
-    "Executive Condominium": 3,
-    "Condominium":         2,
-    "Apartment":           1,
-}
-
-TENURE_ORDER = {
-    "Freehold": 4,
-    "999yr":    3,
-    "99yr":     1,
-    "Other":    0,
-}
-
+# ── Target encoding ────────────────────────────────────────────────────────────
 
 def smoothed_target_encode(train_df, col, target, smoothing=20):
-    """
-    Smoothed target encoding computed on training data only.
-    Rare categories are pulled toward the global mean.
-    """
+    """Smoothed mean encoding — computed on train only to prevent leakage."""
     global_mean = train_df[target].mean()
     stats  = train_df.groupby(col)[target].agg(["mean", "count"])
     weight = stats["count"] / (stats["count"] + smoothing)
-    encoded = weight * stats["mean"] + (1 - weight) * global_mean
-    return encoded.to_dict(), global_mean
+    return (weight * stats["mean"] + (1 - weight) * global_mean).to_dict(), global_mean
 
 
 def apply_target_encode(series, mapping, global_mean):
@@ -142,10 +172,6 @@ def apply_target_encode(series, mapping, global_mean):
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
 def load_and_preprocess(paths):
-    """
-    Load CSVs, filter to Resale only, engineer all features.
-    Returns a single cleaned DataFrame with a 'tier' column.
-    """
     frames = []
     for p in paths:
         try:
@@ -156,81 +182,68 @@ def load_and_preprocess(paths):
         return None
 
     raw = pd.concat(frames, ignore_index=True)
-
-    # Filter: Resale only
     raw = raw[raw["Type of Sale"].str.strip() == "Resale"].copy()
 
-    # Parse target
-    raw["price"] = raw["Transacted Price ($)"].apply(parse_price)
-
-    # Parse numeric features
+    raw["price"]    = raw["Transacted Price ($)"].apply(parse_price)
     raw["area_sqft"] = raw["Area (SQFT)"].apply(parse_area)
 
-    # Parse sale date
     raw[["sale_year", "sale_month"]] = raw["Sale Date"].apply(
         lambda v: pd.Series(parse_sale_date(v))
     )
 
-    # Parse tenure
-    tenure_parsed      = raw["Tenure"].apply(parse_tenure)
+    tenure_parsed       = raw["Tenure"].apply(parse_tenure)
     raw["tenure_label"] = tenure_parsed.apply(lambda x: x[0])
     raw["lease_start"]  = tenure_parsed.apply(lambda x: x[1])
 
-    # Derived features
     raw["floor_mid"] = raw["Floor Level"].apply(parse_floor)
 
     raw["lease_remaining"] = raw.apply(
         lambda r: compute_lease_remaining(
-            r["tenure_label"],
-            r["lease_start"],
+            r["tenure_label"], r["lease_start"],
             r["sale_year"] if not pd.isna(r["sale_year"]) else CURRENT_YEAR,
-        ),
-        axis=1,
+        ), axis=1,
     )
 
-    # Ordinal encodings
     raw["tenure_enc"]    = raw["tenure_label"].map(TENURE_ORDER).fillna(0)
-    raw["segment_enc"]   = raw["Market Segment"].map(SEGMENT_ORDER).fillna(0)
     raw["proptype_enc"]  = raw["Property Type"].map(PROPTYPE_ORDER).fillna(0)
     raw["area_type_enc"] = (raw["Type of Area"].str.strip() == "Land").astype(float)
     raw["district"]      = pd.to_numeric(raw["Postal District"], errors="coerce")
+    raw["region_cluster"] = raw["district"].apply(get_region_cluster)
 
-    # Tier classification
     raw["tier"] = raw.apply(
         lambda r: classify_tier(r["Property Type"], r["Market Segment"]), axis=1
     )
 
-    # Drop rows missing essentials
     clean = raw.dropna(subset=["price", "area_sqft", "sale_year", "district"])
     clean = clean[clean["price"] > 0].copy()
     return clean
 
 
 def build_encoders(train_df):
-    """Build target encoders from training data only (no leakage)."""
-    proj_map, proj_global = smoothed_target_encode(train_df, "Project Name", "price", smoothing=20)
-    dist_map, dist_global = smoothed_target_encode(train_df, "district",     "price", smoothing=10)
+    """All target encoders built from training data only."""
+    proj_map,   proj_g   = smoothed_target_encode(train_df, "Project Name",    "price", 20)
+    dist_map,   dist_g   = smoothed_target_encode(train_df, "district",         "price", 10)
+    region_map, region_g = smoothed_target_encode(train_df, "region_cluster",   "price", 15)
     return {
-        "project":  (proj_map,  proj_global),
-        "district": (dist_map,  dist_global),
+        "project":        (proj_map,   proj_g),
+        "district":       (dist_map,   dist_g),
+        "region_cluster": (region_map, region_g),
     }
 
 
 def apply_encoders(df, encoders):
     df = df.copy()
-    proj_map,  proj_global = encoders["project"]
-    dist_map,  dist_global = encoders["district"]
-    df["project_enc"]  = apply_target_encode(df["Project Name"], proj_map,  proj_global)
-    df["district_enc"] = apply_target_encode(df["district"],     dist_map,  dist_global)
+    df["project_enc"]       = apply_target_encode(df["Project Name"],   *encoders["project"])
+    df["district_enc"]      = apply_target_encode(df["district"],        *encoders["district"])
+    df["region_cluster_enc"] = apply_target_encode(df["region_cluster"], *encoders["region_cluster"])
     return df
 
 
 def compute_growth_rates(df):
-    """Annual YoY price appreciation rate per market segment."""
+    """YoY median price appreciation per market segment."""
     yearly = (
         df.groupby(["Market Segment", "sale_year"])["price"]
-        .median()
-        .reset_index()
+        .median().reset_index()
     )
     rates = {}
     for seg in yearly["Market Segment"].unique():
