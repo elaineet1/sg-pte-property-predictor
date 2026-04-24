@@ -47,7 +47,9 @@ def xgb_params():
 
 def train_tier(tier_df, tier):
     feats = FEATURE_COLS[tier]
-    tier_df = tier_df.dropna(subset=feats + ["price"])
+    # district_enc and project_enc are added by apply_encoders — exclude from pre-encode dropna
+    base_feats = [f for f in feats if f not in ("district_enc", "project_enc")]
+    tier_df = tier_df.dropna(subset=base_feats + ["price"])
 
     if len(tier_df) < 50:
         return None, None, None, None
