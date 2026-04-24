@@ -1,8 +1,18 @@
+---
+title: SG Private Property Resale Price Predictor
+emoji: 🏢
+colorFrom: blue
+colorTo: purple
+sdk: streamlit
+sdk_version: 1.32.0
+app_file: app.py
+pinned: false
+license: mit
+---
+
 # 🏢 SG Private Property Resale Price Predictor
 
 A machine learning web app that predicts Singapore private property resale prices using XGBoost, trained on URA (Urban Redevelopment Authority) transaction data.
-
-**Live demo:** [sg-pte-property-predictor.streamlit.app](https://sg-pte-property-predictor.streamlit.app)
 
 ---
 
@@ -150,21 +160,21 @@ http://localhost:8501
 
 ---
 
-## How to Deploy (Streamlit Community Cloud — Free)
+## How to Deploy
 
-1. Fork this repo to your GitHub account
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Sign in with GitHub
-4. Click **New app**
-5. Fill in:
-   - Repository: `your-username/sg-pte-property-predictor`
-   - Branch: `main`
-   - Main file: `app.py`
-6. Click **Deploy**
+### Hugging Face Spaces (Recommended — Free, 2 vCPU, 16GB RAM)
+1. Go to [huggingface.co](https://huggingface.co) → New Space
+2. Select **Streamlit** as SDK
+3. Link to this GitHub repo
+4. Deploy — app live in ~2 minutes
 
-Your app will be live at `https://your-username-sg-pte-property-predictor.streamlit.app`
+### Streamlit Community Cloud (Free)
+1. Go to [share.streamlit.io](https://share.streamlit.io)
+2. Sign in with GitHub
+3. Select this repo, branch `main`, file `app.py`
+4. Deploy
 
-> **Note:** The trained model is not stored between sessions on the free tier. Each new session requires re-uploading CSVs and retraining (~60 seconds).
+> **Note:** The trained model is not stored between sessions on free tiers. Each new session requires re-uploading CSVs and retraining (~60–90 seconds). Page refreshes within the same session are instant thanks to `@st.cache_resource`.
 
 ---
 
