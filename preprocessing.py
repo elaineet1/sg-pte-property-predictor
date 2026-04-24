@@ -5,6 +5,35 @@ import os
 
 CURRENT_YEAR = 2026
 
+# ── Tier definitions ───────────────────────────────────────────────────────────
+TIERS = {
+    "Normal":      "Normal (OCR / RCR Condo & Apartment)",
+    "Luxury":      "Luxury (CCR Condo)",
+    "Ultra":       "Ultra-luxury (Landed)",
+}
+
+LANDED_TYPES = {"Terrace House", "Semi-Detached House", "Detached House"}
+
+def classify_tier(property_type, market_segment):
+    if property_type in LANDED_TYPES:
+        return "Ultra"
+    if market_segment == "Core Central Region":
+        return "Luxury"
+    return "Normal"
+
+# Features used per tier (landed has no floor level)
+FEATURE_COLS = {
+    "Normal": ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
+               "segment_enc", "proptype_enc", "area_type_enc",
+               "sale_year", "sale_month", "district_enc", "project_enc"],
+    "Luxury": ["area_sqft", "floor_mid", "lease_remaining", "tenure_enc",
+               "segment_enc", "proptype_enc", "area_type_enc",
+               "sale_year", "sale_month", "district_enc", "project_enc"],
+    "Ultra":  ["area_sqft", "lease_remaining", "tenure_enc",
+               "segment_enc", "proptype_enc",
+               "sale_year", "sale_month", "district_enc", "project_enc"],
+}
+
 # ── Parsers ────────────────────────────────────────────────────────────────────
 
 def parse_price(val):
@@ -70,39 +99,38 @@ def compute_lease_remaining(tenure_label, lease_start, ref_year):
         return float(total) / 2
     return max(0.0, lease_start + total - ref_year)
 
-# ── Encoding helpers ───────────────────────────────────────────────────────────
+# ── Encodings ──────────────────────────────────────────────────────────────────
 
 SEGMENT_ORDER = {
-    "Core Central Region": 3,
+    "Core Central Region":    3,
     "Rest of Central Region": 2,
     "Outside Central Region": 1,
 }
 
 PROPTYPE_ORDER = {
-    "Detached House": 6,
+    "Detached House":      6,
     "Semi-Detached House": 5,
-    "Terrace House": 4,
+    "Terrace House":       4,
     "Executive Condominium": 3,
-    "Condominium": 2,
-    "Apartment": 1,
+    "Condominium":         2,
+    "Apartment":           1,
 }
 
 TENURE_ORDER = {
     "Freehold": 4,
-    "999yr": 3,
-    "99yr": 1,
-    "Other": 0,
+    "999yr":    3,
+    "99yr":     1,
+    "Other":    0,
 }
 
 
 def smoothed_target_encode(train_df, col, target, smoothing=20):
     """
-    CV-safe smoothed target encoding.
-    Computes on train_df only; returns (mapping_dict, global_mean).
-    Rare categories are pulled toward global mean to prevent overfitting.
+    Smoothed target encoding computed on training data only.
+    Rare categories are pulled toward the global mean.
     """
     global_mean = train_df[target].mean()
-    stats = train_df.groupby(col)[target].agg(["mean", "count"])
+    stats  = train_df.groupby(col)[target].agg(["mean", "count"])
     weight = stats["count"] / (stats["count"] + smoothing)
     encoded = weight * stats["mean"] + (1 - weight) * global_mean
     return encoded.to_dict(), global_mean
@@ -113,25 +141,10 @@ def apply_target_encode(series, mapping, global_mean):
 
 # ── Main pipeline ──────────────────────────────────────────────────────────────
 
-FEATURE_COLS = [
-    "area_sqft",
-    "floor_mid",
-    "lease_remaining",
-    "tenure_enc",
-    "segment_enc",
-    "proptype_enc",
-    "area_type_enc",
-    "sale_year",
-    "sale_month",
-    "district_enc",
-    "project_enc",
-]
-
-
 def load_and_preprocess(paths):
     """
-    Load CSVs, filter to Resale only, engineer features.
-    Returns cleaned DataFrame ready for modelling.
+    Load CSVs, filter to Resale only, engineer all features.
+    Returns a single cleaned DataFrame with a 'tier' column.
     """
     frames = []
     for p in paths:
@@ -144,26 +157,26 @@ def load_and_preprocess(paths):
 
     raw = pd.concat(frames, ignore_index=True)
 
-    # ── Filter: Resale transactions only
+    # Filter: Resale only
     raw = raw[raw["Type of Sale"].str.strip() == "Resale"].copy()
 
-    # ── Parse target
+    # Parse target
     raw["price"] = raw["Transacted Price ($)"].apply(parse_price)
 
-    # ── Parse numeric features
+    # Parse numeric features
     raw["area_sqft"] = raw["Area (SQFT)"].apply(parse_area)
 
-    # ── Parse sale date
+    # Parse sale date
     raw[["sale_year", "sale_month"]] = raw["Sale Date"].apply(
         lambda v: pd.Series(parse_sale_date(v))
     )
 
-    # ── Parse tenure
-    tenure_parsed = raw["Tenure"].apply(parse_tenure)
+    # Parse tenure
+    tenure_parsed      = raw["Tenure"].apply(parse_tenure)
     raw["tenure_label"] = tenure_parsed.apply(lambda x: x[0])
     raw["lease_start"]  = tenure_parsed.apply(lambda x: x[1])
 
-    # ── Derived features
+    # Derived features
     raw["floor_mid"] = raw["Floor Level"].apply(parse_floor)
 
     raw["lease_remaining"] = raw.apply(
@@ -175,25 +188,45 @@ def load_and_preprocess(paths):
         axis=1,
     )
 
-    # ── Ordinal encodings (stable, no leakage risk)
+    # Ordinal encodings
     raw["tenure_enc"]    = raw["tenure_label"].map(TENURE_ORDER).fillna(0)
     raw["segment_enc"]   = raw["Market Segment"].map(SEGMENT_ORDER).fillna(0)
     raw["proptype_enc"]  = raw["Property Type"].map(PROPTYPE_ORDER).fillna(0)
     raw["area_type_enc"] = (raw["Type of Area"].str.strip() == "Land").astype(float)
+    raw["district"]      = pd.to_numeric(raw["Postal District"], errors="coerce")
 
-    raw["district"] = pd.to_numeric(raw["Postal District"], errors="coerce")
+    # Tier classification
+    raw["tier"] = raw.apply(
+        lambda r: classify_tier(r["Property Type"], r["Market Segment"]), axis=1
+    )
 
-    # ── Drop rows missing essentials
-    clean = raw.dropna(subset=["price", "area_sqft", "sale_year", "district", "floor_mid"])
+    # Drop rows missing essentials
+    clean = raw.dropna(subset=["price", "area_sqft", "sale_year", "district"])
     clean = clean[clean["price"] > 0].copy()
     return clean
 
 
-def compute_segment_growth_rates(df):
-    """
-    Returns annual YoY price appreciation rate per market segment.
-    Used to extrapolate predictions beyond training data.
-    """
+def build_encoders(train_df):
+    """Build target encoders from training data only (no leakage)."""
+    proj_map, proj_global = smoothed_target_encode(train_df, "Project Name", "price", smoothing=20)
+    dist_map, dist_global = smoothed_target_encode(train_df, "district",     "price", smoothing=10)
+    return {
+        "project":  (proj_map,  proj_global),
+        "district": (dist_map,  dist_global),
+    }
+
+
+def apply_encoders(df, encoders):
+    df = df.copy()
+    proj_map,  proj_global = encoders["project"]
+    dist_map,  dist_global = encoders["district"]
+    df["project_enc"]  = apply_target_encode(df["Project Name"], proj_map,  proj_global)
+    df["district_enc"] = apply_target_encode(df["district"],     dist_map,  dist_global)
+    return df
+
+
+def compute_growth_rates(df):
+    """Annual YoY price appreciation rate per market segment."""
     yearly = (
         df.groupby(["Market Segment", "sale_year"])["price"]
         .median()
@@ -203,27 +236,8 @@ def compute_segment_growth_rates(df):
     for seg in yearly["Market Segment"].unique():
         sub = yearly[yearly["Market Segment"] == seg].sort_values("sale_year")
         if len(sub) < 2:
-            rates[seg] = 0.03  # default 3%
+            rates[seg] = 0.03
             continue
-        sub["pct_change"] = sub["price"].pct_change()
-        rates[seg] = float(sub["pct_change"].dropna().clip(-0.2, 0.3).mean())
+        pct = sub["price"].pct_change().dropna().clip(-0.20, 0.30)
+        rates[seg] = float(pct.mean())
     return rates
-
-
-def build_encoders(train_df):
-    """Build target encoders from training data only (no leakage)."""
-    proj_map, proj_global = smoothed_target_encode(train_df, "Project Name", "price", smoothing=20)
-    dist_map, dist_global = smoothed_target_encode(train_df, "district", "price", smoothing=10)
-    return {
-        "project": (proj_map, proj_global),
-        "district": (dist_map, dist_global),
-    }
-
-
-def apply_encoders(df, encoders):
-    df = df.copy()
-    proj_map, proj_global = encoders["project"]
-    dist_map, dist_global = encoders["district"]
-    df["project_enc"] = apply_target_encode(df["Project Name"], proj_map, proj_global)
-    df["district_enc"] = apply_target_encode(df["district"], dist_map, dist_global)
-    return df
