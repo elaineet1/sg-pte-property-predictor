@@ -159,6 +159,7 @@ def main(data_folder):
             "project_meta": project_meta.set_index("Project Name").to_dict("index"),
             "tier_counts":  tier_counts,
             "last_year":    last_year,
+            "df_sample":    df.sample(min(500, len(df)), random_state=42),
         }, f)
 
     print("\nPre-training complete! Files saved:")

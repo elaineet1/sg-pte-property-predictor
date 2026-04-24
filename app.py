@@ -70,9 +70,9 @@ if (not st.session_state.trained
         "growth_rates": _meta["growth_rates"],
         "project_meta": _meta["project_meta"],
         "tier_counts":  _meta["tier_counts"],
-        "df":           pd.DataFrame({"sale_year": [_meta["last_year"]], "tier": ["OCR"],
-                                      "Market Segment": ["Outside Central Region"],
-                                      "region_cluster": ["East"]}),
+        "df":           _meta.get("df_sample", pd.DataFrame({"sale_year": [_meta["last_year"]],
+                                      "tier": ["OCR"], "Market Segment": ["Outside Central Region"],
+                                      "region_cluster": ["East"]})),
         "trained":      True,
     })
 
